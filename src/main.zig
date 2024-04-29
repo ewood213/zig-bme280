@@ -15,7 +15,6 @@ pub fn main() !void {
     try sensor.set_standby_time(bme280.StandbyTimeVal.OneSecond);
     try sensor.set_filter_coef(bme280.FilterCoef.Off);
     try sensor.put_mode(bme280.SensorMode.Normal);
-    // std.time.sleep(2000000000);
     const data = try sensor.get_all_measurements(calib);
     print("Data: {}\n", .{data});
 }

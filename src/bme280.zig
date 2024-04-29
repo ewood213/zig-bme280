@@ -1,11 +1,6 @@
 // Includes
 const std = @import("std");
-const libc = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("linux/i2c-dev.h");
-    @cInclude("unistd.h");
-});
+const i2c_interface = @import("linux_i2c.zig").i2c_interface;
 
 // Constants
 const I2C_PATH = "/dev/i2c-1";
@@ -17,8 +12,12 @@ const ID_VAL = 0x60;
 const CTRL_MEAS_REG = 0xF4;
 const CTRL_HUM_REG = 0xF2;
 const CONFIG_REG = 0xF5;
+const STATUS_REG = 0xF3;
 
-const CALIB1_REG_START = 0x88; 
+const RESET_REG = 0xE0;
+const RESET_VAL = 0xB6;
+
+const CALIB1_REG_START = 0x88;
 const CALIB1_REG_END = 0xA2;
 
 const CALIB2_REG_START = 0xE1;
@@ -35,9 +34,6 @@ const TEMP_XLSB_REG = 0xFC;
 const HUM_MSB_REG = 0xFD;
 const HUM_LSB_REG = 0xFE;
 
-// Errors
-pub const DriverError = error{ ReadError, WriteError, InitError };
-
 // Enums
 pub const SensorMode = enum { Sleep, Forced, Normal };
 pub const SensorType = enum { Humidity, Pressure, Temperature };
@@ -53,7 +49,6 @@ pub const Calibration = struct {
         dig_T3: i16,
     };
 
-
     pub const Pressure = struct {
         dig_P1: u16,
         dig_P2: i16,
@@ -66,7 +61,6 @@ pub const Calibration = struct {
         dig_P9: i16,
     };
 
-
     pub const Humidity = struct {
         dig_H1: u8,
         dig_H2: i16,
@@ -78,54 +72,25 @@ pub const Calibration = struct {
 
     temperature: Temperature,
     pressure: Pressure,
-    humidity: Humidity
+    humidity: Humidity,
 };
 
-pub const Data = struct {
-    temperature: f64,
-    pressure: f64,
-    humidity: f64
-};
+pub const Data = struct { temperature: f64, pressure: f64, humidity: f64 };
+
+fn byte_concat16(comptime T: type, msb: u8, lsb: u8) T {
+    comptime std.debug.assert(T == u16 or T == i16);
+    return @shlWithOverflow(@as(T, msb), 8)[0] | lsb;
+}
 
 pub const bme280 = struct {
-    file: std.fs.File,
-
-    fn get_rw_type(comptime len: u32) type {
-        if(len == 1) {
-            return u8;
-        } else {
-            return [len]u8;
-        }
-    }
+    i2c: i2c_interface,
 
     pub fn init() !bme280 {
-        const file = try std.fs.openFileAbsolute("/dev/i2c-1", std.fs.File.OpenFlags{ .mode = .read_write });
-        if (libc.ioctl(file.handle, libc.I2C_SLAVE, BME280_ADDR) < 0) {
-            return DriverError.InitError;
-        }
-        return bme280{ .file = file };
+        return bme280{ .i2c = try i2c_interface.init(I2C_PATH, BME280_ADDR) };
     }
 
     pub fn deinit(self: bme280) void {
-        self.file.close();
-    }
-
-    fn read(self: bme280, reg: u8, comptime len: u32) DriverError!get_rw_type(len) {
-        if (libc.write(self.file.handle, &reg, @sizeOf(@TypeOf(reg))) < 0) {
-            return DriverError.WriteError;
-        }
-        var ret: get_rw_type(len) = undefined;
-        if (libc.read(self.file.handle, &ret, len) < 0) {
-            return DriverError.ReadError;
-        }
-        return ret;
-    }
-
-    fn write(self: bme280, reg: u8, val: u8) !void {
-        const vals: [2]u8 = .{ reg, val };
-        if (libc.write(self.file.handle, &vals, @sizeOf(@TypeOf(vals))) < 0) {
-            return DriverError.ReadError;
-        }
+        self.i2c.deinit();
     }
 
     pub fn put_mode(self: bme280, mode: SensorMode) !void {
@@ -134,9 +99,9 @@ pub const bme280 = struct {
             .Forced => 0x01,
             .Normal => 0x03,
         };
-        const cur_val = try self.read(CTRL_MEAS_REG, 1);
+        const cur_val = try self.i2c.read(CTRL_MEAS_REG, 1);
         const next_val = (cur_val & 0xFC) | ctrl_byte;
-        try self.write(CTRL_MEAS_REG, next_val);
+        try self.i2c.write(CTRL_MEAS_REG, next_val);
     }
 
     pub fn set_oversampling(self: bme280, sensor_type: SensorType, oversampling: OverSamplingVal) !void {
@@ -151,19 +116,19 @@ pub const bme280 = struct {
 
         switch (sensor_type) {
             .Humidity => {
-                const cur_val = try self.read(CTRL_HUM_REG, 1);
+                const cur_val = try self.i2c.read(CTRL_HUM_REG, 1);
                 const next_val = (cur_val & 0xF8) | oversample_reg_val;
-                try self.write(CTRL_HUM_REG, next_val);
+                try self.i2c.write(CTRL_HUM_REG, next_val);
             },
             .Pressure => {
-                const cur_val = try self.read(CTRL_MEAS_REG, 1);
+                const cur_val = try self.i2c.read(CTRL_MEAS_REG, 1);
                 const next_val = (cur_val & 0x8F) | (oversample_reg_val << 5);
-                try self.write(CTRL_MEAS_REG, next_val);
+                try self.i2c.write(CTRL_MEAS_REG, next_val);
             },
             .Temperature => {
-                const cur_val = try self.read(CTRL_MEAS_REG, 1);
+                const cur_val = try self.i2c.read(CTRL_MEAS_REG, 1);
                 const next_val = (cur_val & 0xE3) | (oversample_reg_val << 2);
-                try self.write(CTRL_MEAS_REG, next_val);
+                try self.i2c.write(CTRL_MEAS_REG, next_val);
             },
         }
     }
@@ -180,9 +145,9 @@ pub const bme280 = struct {
             .TwentyMs => 0x07,
         };
 
-        const cur_val = try self.read(CONFIG_REG, 1);
+        const cur_val = try self.i2c.read(CONFIG_REG, 1);
         const next_val = (cur_val & 0x8F) | (time_reg_val << 5);
-        try self.write(CONFIG_REG, next_val);
+        try self.i2c.write(CONFIG_REG, next_val);
     }
 
     pub fn set_filter_coef(self: bme280, filter_coef: FilterCoef) !void {
@@ -194,24 +159,19 @@ pub const bme280 = struct {
             .Sixteen => 0x04,
         };
 
-        const cur_val = try self.read(CONFIG_REG, 1);
+        const cur_val = try self.i2c.read(CONFIG_REG, 1);
         const next_val = (cur_val & 0xE3) | (filter_coef_reg_val << 4);
-        try self.write(CONFIG_REG, next_val);
+        try self.i2c.write(CONFIG_REG, next_val);
     }
 
     pub fn probe(self: bme280) !bool {
-        const id_val = try self.read(ID_REG, 1);
+        const id_val = try self.i2c.read(ID_REG, 1);
         return id_val == ID_VAL;
     }
 
-    fn byte_concat16(comptime T: type, msb: u8, lsb: u8) T {
-        // std.debug.assert((T == u16) || (T == i16));
-        return @shlWithOverflow(@as(T, msb), 8)[0] | lsb;
-    }
-
     pub fn get_calibration(self: bme280) !Calibration {
-        const calib1_reading = try self.read(CALIB1_REG_START, CALIB1_REG_END - CALIB1_REG_START);
-        const calib2_reading = try self.read(CALIB2_REG_START, CALIB2_REG_END - CALIB2_REG_START);
+        const calib1_reading = try self.i2c.read(CALIB1_REG_START, CALIB1_REG_END - CALIB1_REG_START);
+        const calib2_reading = try self.i2c.read(CALIB2_REG_START, CALIB2_REG_END - CALIB2_REG_START);
 
         const ret: Calibration = .{
             .temperature = .{
@@ -232,34 +192,33 @@ pub const bme280 = struct {
                 .dig_P9 = byte_concat16(i16, calib1_reading[23], calib1_reading[22]),
             },
 
-            .humidity = .{
-                .dig_H1 = calib1_reading[25],
-                .dig_H2 = byte_concat16(i16, calib2_reading[1], calib2_reading[0]),
-                .dig_H3 = calib2_reading[2],
-                .dig_H4 = (@as(i16, calib2_reading[3]) << 4) | (calib2_reading[4] & 0x0F),
-                .dig_H5 = (@as(i16, calib2_reading[5]) << 4) | (calib1_reading[4] >> 4),
-                .dig_H6 = calib2_reading[6]
-            },
+            .humidity = .{ .dig_H1 = calib1_reading[25], .dig_H2 = byte_concat16(i16, calib2_reading[1], calib2_reading[0]), .dig_H3 = calib2_reading[2], .dig_H4 = (@as(i16, calib2_reading[3]) << 4) | (calib2_reading[4] & 0x0F), .dig_H5 = (@as(i16, calib2_reading[5]) << 4) | (calib1_reading[4] >> 4), .dig_H6 = calib2_reading[6] },
         };
-        
-        // std.debug.print("Here are the readings {d} {d}\n", .{calib1_reading, calib2_reading});
-        // std.debug.print("And here are my values {}\n", .{ret});
+
         return ret;
     }
 
     pub fn get_all_measurements(self: bme280, calib_data: Calibration) !Data {
-        const reg_data = try self.read(PRESS_MSB_REG, HUM_LSB_REG - PRESS_MSB_REG + 1);
+        const reg_data = try self.i2c.read(PRESS_MSB_REG, HUM_LSB_REG - PRESS_MSB_REG + 1);
         const press_data: i32 = (@as(i32, reg_data[0]) << 12) | (@as(i32, reg_data[1]) << 4) | (reg_data[5] >> 4);
         const temp_data: i32 = (@as(i32, reg_data[3]) << 12) | (@as(i32, reg_data[4]) << 4) | (reg_data[5] >> 4);
         const hum_data: u16 = byte_concat16(u16, reg_data[6], reg_data[7]);
 
-        std.debug.print("RAW: t: {} p: {} h {}\n", .{temp_data, press_data, hum_data});
         const temperature = calc_temperature(temp_data, calib_data.temperature);
         return .{
             .pressure = calc_pressure(press_data, temperature, calib_data.pressure),
             .temperature = temperature,
             .humidity = calc_humidity(hum_data, temperature, calib_data.humidity),
         };
+    }
+
+    pub fn is_measuring(self: bme280) !bool {
+        const status_reg = try self.i2c.read(STATUS_REG, 1);
+        return status_reg & 0x80 != 0;
+    }
+
+    pub fn reset(self: bme280) !void {
+        try self.i2c.write(STATUS_REG, RESET_VAL);
     }
 
     fn calc_pressure(press_data: i32, temperature: f64, press_calib: Calibration.Pressure) f64 {
@@ -286,7 +245,6 @@ pub const bme280 = struct {
         const var7 = dig_P9 * p2 * p2 / 2147483648.0;
         const var8 = p2 * dig_P8 / 32768.0;
 
-        // std.debug.print("VALUES: {} {} {} {} {} {} {} {} {} {}\n", .{var1, var2, var3, var4, var5, var6, p1, p2, var7, var8});
         return p2 + (var7 + var8 + dig_P7) / 16.0;
     }
 
@@ -295,8 +253,8 @@ pub const bme280 = struct {
         const dig_T1: f64 = @floatFromInt(temp_calib.dig_T1);
         const dig_T2: f64 = @floatFromInt(temp_calib.dig_T2);
         const dig_T3: f64 = @floatFromInt(temp_calib.dig_T3);
-        const var1: f64  = (ftemp_data/16384.0 - dig_T1/1024.0) * dig_T2;
-        const var2 = (ftemp_data/131072.0 - dig_T1/8192.0) * (ftemp_data/131072.0 - dig_T1/8192.0) * dig_T3;
+        const var1: f64 = (ftemp_data / 16384.0 - dig_T1 / 1024.0) * dig_T2;
+        const var2 = (ftemp_data / 131072.0 - dig_T1 / 8192.0) * (ftemp_data / 131072.0 - dig_T1 / 8192.0) * dig_T3;
         return (var1 + var2) / 5120.0;
     }
 
