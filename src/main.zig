@@ -7,7 +7,7 @@ const i2c_interface = linux_i2c.create_i2c_interface_type("/dev/i2c-1", bme280.A
 const i2c_bme280 = bme280.create_bme280_type(i2c_interface);
 
 const CONVERSION_DELAY_MS = 100 * 1000 * 1000;
-const TIME_BETWEEN_SAMPLES_NS = 5 * 1000 * 1000 * 1000;
+const TIME_BETWEEN_SAMPLES_NS = 60 * 1000 * 1000 * 1000;
 
 pub fn main() !void {
     const sensor = try init_probe();
