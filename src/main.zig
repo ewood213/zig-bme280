@@ -9,18 +9,23 @@ const i2c_bme280 = bme280.create_bme280_type(i2c_interface);
 const CONVERSION_DELAY_MS = 100 * 1000 * 1000;
 const TIME_BETWEEN_SAMPLES_NS = 60 * 1000 * 1000 * 1000;
 
+const Data = struct {
+    timestamp: i64,
+    data: bme280.Data,
+};
+
 pub fn main() !void {
     const sensor = try init_probe();
     defer sensor.deinit();
 
     const stdout = std.io.getStdOut().writer();
-    try stdout.print("Time,Temperature,Pressure,Humidity\n", .{});
     while (true) {
         const timestamp = std.time.timestamp();
         try sensor.put_mode(bme280.SensorMode.Forced);
         std.time.sleep(CONVERSION_DELAY_MS);
-        const data = try sensor.get_all_measurements();
-        try stdout.print("{},{},{},{}\n", .{ timestamp, data.temperature, data.pressure, data.humidity });
+        const data = Data{ .timestamp = timestamp, .data = try sensor.get_all_measurements() };
+        try std.json.stringify(data, std.json.StringifyOptions{}, stdout);
+        _ = try stdout.write("\n");
         std.time.sleep(TIME_BETWEEN_SAMPLES_NS - CONVERSION_DELAY_MS);
     }
 }
